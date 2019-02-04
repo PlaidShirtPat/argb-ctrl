@@ -215,5 +215,6 @@ for i in range(0, len(parsed_bits), TUP_BITS):
     blue  = int("".join(str(e) for e in parsed_bits[i+16:i+24]),2)
     grb_tuples.append((green, red, blue))
 
+print(f"orig_len:{len(raw_bits)} bits ({len(raw_bits)/8}bytes")
 print(f"len: {len(grb_tuples)}")
 print(grb_tuples)
