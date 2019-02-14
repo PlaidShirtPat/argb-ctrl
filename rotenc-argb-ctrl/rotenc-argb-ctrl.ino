@@ -154,26 +154,19 @@ int8_t getEncoderAction(RotEnc* rotEnc)
     enc_cur_pos |= (1 << 1);
 
   // if any rotation at all
-  if (enc_cur_pos != rotEnc->prevPos)
-  {
-    if (rotEnc->prevPos == 0x00)
-    {
+  if (enc_cur_pos != rotEnc->prevPos) {
+    if (rotEnc->prevPos == 0x00) {
       // this is the first edge
-      if (enc_cur_pos == 0x01) {
+      if (enc_cur_pos == 0x01)
         rotEnc->state |= (1 << 0);
-      }
-      else if (enc_cur_pos == 0x02) {
+      else if (enc_cur_pos == 0x02)
         rotEnc->state |= (1 << 1);
-      }
     }
 
-    if (enc_cur_pos == 0x03)
-    {
       // this is when the encoder is in the middle of a "step"
+    if (enc_cur_pos == 0x03) {
       rotEnc->state |= (1 << 4);
-    }
-    else if (enc_cur_pos == 0x00)
-    {
+    } else if (enc_cur_pos == 0x00) {
       // this is the final edge
       if (rotEnc->prevPos == 0x02) {
         rotEnc->state |= (1 << 2);
@@ -185,18 +178,14 @@ int8_t getEncoderAction(RotEnc* rotEnc)
       // check the first and last edge
       // or maybe one edge is missing, if missing then require the middle state
       // this will reject bounces and false movements
-      if (bit_is_set(rotEnc->state, 0) && (bit_is_set(rotEnc->state, 2) || bit_is_set(rotEnc->state, 4))) {
+      if (bit_is_set(rotEnc->state, 0) && (bit_is_set(rotEnc->state, 2) || bit_is_set(rotEnc->state, 4)))
         enc_action = 1;
-      }
-      else if (bit_is_set(rotEnc->state, 2) && (bit_is_set(rotEnc->state, 0) || bit_is_set(rotEnc->state, 4))) {
+      else if (bit_is_set(rotEnc->state, 2) && (bit_is_set(rotEnc->state, 0) || bit_is_set(rotEnc->state, 4)))
         enc_action = 1;
-      }
-      else if (bit_is_set(rotEnc->state, 1) && (bit_is_set(rotEnc->state, 3) || bit_is_set(rotEnc->state, 4))) {
+      else if (bit_is_set(rotEnc->state, 1) && (bit_is_set(rotEnc->state, 3) || bit_is_set(rotEnc->state, 4)))
         enc_action = -1;
-      }
-      else if (bit_is_set(rotEnc->state, 3) && (bit_is_set(rotEnc->state, 1) || bit_is_set(rotEnc->state, 4))) {
+      else if (bit_is_set(rotEnc->state, 3) && (bit_is_set(rotEnc->state, 1) || bit_is_set(rotEnc->state, 4)))
         enc_action = -1;
-      }
 
       rotEnc->state = 0; // reset for next time
     }
