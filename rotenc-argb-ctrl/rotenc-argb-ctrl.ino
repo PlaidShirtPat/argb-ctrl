@@ -3,11 +3,21 @@ Rotary Encoder with ARGB ctrl
 **************************************************************************/
 
 #include <stdbool.h>
+#include <Adafruit_NeoPixel.h>
+#ifdef __AVR__
+  #include <avr/power.h>
+#endif
 
-#define PIN_ENCODER_A       5
-#define PIN_ENCODER_B       3
-#define TRINKET_PINx        PIND
-#define PIN_ENCODER_SWITCH  4
+#define ARGB_PIN   A0
+#define NUM_LEDS   8
+#define BRIGHTNESS 50
+
+#define N_ROTENC 3
+#define ROTENC_PINS { \
+    2, 3, 4, \
+    5, 6, 7, \
+    8, 9, 10 }
+
 #define MAX_LED_VAL         4095
 #define N_ENCODER_STEPS     24
 #define LED_INC             (MAX_LED_VAL / N_ENCODER_STEPS / 2)
@@ -21,13 +31,6 @@ Rotary Encoder with ARGB ctrl
 #define PORTID_1 PINB
 #define PORTID_2 PINC
 
-#define ROTENC_PINS { \
-    2, 3, 4, \
-    5, 6, 7, \
-    8, 9, 10 }
-
-#define N_ROTENC 3
-
 // Rotary encoder struct
 typedef struct  {
 // TODO: Define pins with less bits?
@@ -40,10 +43,13 @@ typedef struct  {
   uint8_t state;        // Encoder state
   uint8_t prevPos;      // last encoder position
   unsigned long swLastChangeMs; // Millisecond timestamp of switch change
-  unsigned long swWasPressed; // Millisecond timestamp of last press
+  bool swWasPressed;    // flag for switch press
 } RotEnc;
 
 static RotEnc   gRotEncs[N_ROTENC] = {0,};
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, ARGB_PIN, NEO_GRB + NEO_KHZ800);
+static unsigned long lastPixUpdate = 0;
+static uint8_t gRGB[3] = {0,};
 
 // see link for port info https://www.arduino.cc/en/Reference/PortManipulation
 uint8_t calcPinPort(uint8_t pin)
@@ -116,11 +122,19 @@ void setupEncoder()
   Serial.println(" RotEncs---");
 }
 
+void setupARGB()
+{
+  strip.setBrightness(BRIGHTNESS);
+  strip.begin();
+  strip.show(); // Initialize all pixels to 'off'
+}
+
 void setup()
 {
   Serial.begin(9600);
   Serial.println(ON_MSG);
   setupEncoder();
+  setupARGB();
 }
 
 int8_t getEncoderAction(RotEnc* rotEnc)
@@ -196,14 +210,18 @@ void handleRotEncUpdates()
 {
   unsigned long now = millis();
 
-  // hand
+  // loop through encoders
   for(uint8_t i=0; i < N_ROTENC; i++) {
     // handle rotation updates
     int8_t enc_action = getEncoderAction(&gRotEncs[i]);
     if (enc_action > 0) { // Clockwise
+      if(gRGB[i] < 255)
+        gRGB[i]++;
       Serial.print(i, DEC);
       Serial.println(CW_CHAR);
     } else if (enc_action < 0) { // Counter-clockwise
+      if(gRGB > 0)
+        gRGB[i]--;
       Serial.print(i, DEC);
       Serial.println(CCW_CHAR);
     }
@@ -218,6 +236,7 @@ void handleRotEncUpdates()
       if(bit_is_clear(swPort, gRotEncs[i].swPin % 8)) {
         // only fire on the first press
         if(!gRotEncs[i].swWasPressed) {
+          gRGB[i] = 0;
           Serial.print(i, DEC);
           Serial.println(SW_CHAR);
           gRotEncs[i].swLastChangeMs = now;
@@ -234,5 +253,14 @@ void handleRotEncUpdates()
 
 void loop()
 {
+  unsigned long now = millis();
   handleRotEncUpdates();
+
+  if((now - lastPixUpdate) > 10) {
+    for(uint16_t i=0; i<strip.numPixels(); i++) {
+      strip.setPixelColor(i, strip.Color(gRGB[0], gRGB[1], gRGB[2]));
+    }
+    strip.show();
+    lastPixUpdate = now;
+  }
 }
