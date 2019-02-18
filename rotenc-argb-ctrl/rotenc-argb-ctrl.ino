@@ -4,21 +4,36 @@ Rotary Encoder with ARGB ctrl
 
 #include <stdbool.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_TLC5947.h>
 #ifdef __AVR__
   #include <avr/power.h>
 #endif
 
-#define ARGB_PIN   A0
-#define NUM_LEDS   8
-#define BRIGHTNESS 50
+// How many boards do you have chained?
+#define NUM_TLC5974 1
+#define data   11
+#define clock  13
+#define latch  12
+#define oe     -1    // set to -1 to not use the enable pin (its optional)
 
-#define N_ROTENC 3
+// Type returned by millis() "syscall" (???)
+#define ms_time_t unsigned long
+
+#define ARGB_PIN    A0
+#define NUM_LEDS    8
+#define BRIGHTNESS  50
+
+#define N_BTNS      3
+#define BTN_PINS    { A3, A4, A5 }
+#define BTN_ADDRS   { 0,  1,  2  }
+
+#define N_ROTENC    3
 #define ROTENC_PINS { \
     2, 3, 4, \
     5, 6, 7, \
     8, 9, 10 }
 
-#define MAX_LED_VAL         4095
+#define MAX_LED_VAL         255
 #define N_ENCODER_STEPS     24
 #define LED_INC             (MAX_LED_VAL / N_ENCODER_STEPS / 2)
 #define ON_MSG              "---ARGBCTRL-ON---"
@@ -27,29 +42,71 @@ Rotary Encoder with ARGB ctrl
 #define SW_CHAR             'v'
 #define SW_DEBOUNCE_MS      5
 
-#define PORTID_0 PIND
-#define PORTID_1 PINB
-#define PORTID_2 PINC
+#define SERIAL_CMD_DELIM      ';'
+#define SERIAL_CMD_MAXLEN     64
+#define SERIAL_CMD_ARG_DELIM  ','
+#define SERIAL_CMD_MAXARGS    4
+
+// command format: c<stripIndex>,<red>,<green>,<blue>;
+// set strip 0 to red: c0,255,0,0;
+#define SERIAL_CMD_COLOR      'c'
+// command format: b<btnIndex>,<red>,<green>,<blue>;
+// set button 0 to red: b0,255,0,0;
+#define SERIAL_CMD_BTN_COLOR  'b'
+
+// Map of port ids to port values
+#define PORTID_0            PIND
+#define PORTID_1            PINB
+#define PORTID_2            PINC
+
+#define RED_ID    0
+#define BLUE_ID   1
+#define GREEN_ID  2
+typedef uint8_t ColorId;
+
+typedef struct {
+  uint8_t   red;              // red value
+  uint8_t   green;            // green value
+  uint8_t   blue;             // blue value
+} RGBStrip;
+
+typedef struct {
+  uint8_t   swPin;            // Switch pin
+  uint8_t   swPort;           // Switch port register for fast read access
+  ms_time_t swLastChangeMs;   // Millisecond timestamp of last switch, for debounce
+  bool      swWasPressed;     // flag for switch press
+
+} IOSwitch;
 
 // Rotary encoder struct
 typedef struct  {
-// TODO: Define pins with less bits?
-  uint8_t aPin;         // A pin of rotary encoder
-  uint8_t aPort;        // A port register for fast read access
-  uint8_t bPin;         // B pin of rotary encoder
-  uint8_t bPort;        // B port register for fast read access
-  uint8_t swPin;        // Switch pin
-  uint8_t swPort;       // Switch port register for fast read access
-  uint8_t state;        // Encoder state
-  uint8_t prevPos;      // last encoder position
-  unsigned long swLastChangeMs; // Millisecond timestamp of switch change
-  bool swWasPressed;    // flag for switch press
+  // TODO: Define pins with less bits?
+  uint8_t   aPin;             // A pin of rotary encoder
+  uint8_t   aPort;            // A port register for fast read access
+  uint8_t   bPin;             // B pin of rotary encoder
+  uint8_t   bPort;            // B port register for fast read access
+  uint8_t   state;            // Encoder state
+  uint8_t   prevPos;          // last encoder position
+  IOSwitch  btn;
 } RotEnc;
 
-static RotEnc   gRotEncs[N_ROTENC] = {0,};
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, ARGB_PIN, NEO_GRB + NEO_KHZ800);
-static unsigned long lastPixUpdate = 0;
-static uint8_t gRGB[3] = {0,};
+// RGB Button struct
+typedef struct {
+  uint8_t   btnPin;           // button switch pin
+  uint8_t   rgbAddr;          // address on the PWM controller
+  RGBStrip  color;            // color of button
+  ms_time_t btnLastChangeMs;  // Millisecond timestamp of last switch, for debounce
+  bool      btnWasPressed;    // flag for switch press
+} RGBBtn;
+
+static RGBBtn     gRGBBtns[N_BTNS]    = {0,};
+static RotEnc     gRotEncs[N_ROTENC]  = {0,};
+Adafruit_NeoPixel strip               = Adafruit_NeoPixel(NUM_LEDS, ARGB_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_TLC5947  tlc                 = Adafruit_TLC5947(NUM_TLC5974, clock, data, latch);
+static ms_time_t  gLastPixUpdate      = 0;
+static ms_time_t  gLastRGBBtnUpdate   = 0;
+static uint8_t    gRGB[3]             = {0,};
+static uint8_t    gSelectedStrip       = 0;
 
 // see link for port info https://www.arduino.cc/en/Reference/PortManipulation
 uint8_t calcPinPort(uint8_t pin)
@@ -92,12 +149,12 @@ void setupEncoder()
     gRotEncs[i].aPort  = calcPinPort(gRotEncs[i].aPin);
     gRotEncs[i].bPin   = rotEncPins[i*3+1];
     gRotEncs[i].bPort  = calcPinPort(gRotEncs[i].bPin);
-    gRotEncs[i].swPin  = rotEncPins[i*3+2];
-    gRotEncs[i].swPort = calcPinPort(gRotEncs[i].swPin);
+    gRotEncs[i].btn.swPin  = rotEncPins[i*3+2];
+    gRotEncs[i].btn.swPort = calcPinPort(gRotEncs[i].btn.swPin);
 
     pinMode(gRotEncs[i].aPin, INPUT_PULLUP);
     pinMode(gRotEncs[i].bPin, INPUT_PULLUP);
-    pinMode(gRotEncs[i].swPin, INPUT_PULLUP);
+    pinMode(gRotEncs[i].btn.swPin, INPUT_PULLUP);
 
     // get an initial reading on the encoder pins
     if (digitalRead(gRotEncs[i].aPin) == LOW)
@@ -113,7 +170,7 @@ void setupEncoder()
     Serial.print(",bPin=");
     Serial.print(gRotEncs[i].bPin);
     Serial.print(",swPin=");
-    Serial.print(gRotEncs[i].swPin);
+    Serial.print(gRotEncs[i].btn.swPin);
     Serial.println("}");
   }
 
@@ -124,9 +181,31 @@ void setupEncoder()
 
 void setupARGB()
 {
-  strip.setBrightness(BRIGHTNESS);
+  /* strip.setBrightness(BRIGHTNESS); */
   strip.begin();
   strip.show(); // Initialize all pixels to 'off'
+}
+
+void setupRGBBtns()
+{
+  uint8_t btnPins[]   = BTN_PINS;
+  uint8_t btnAddrs[]  = BTN_ADDRS;
+
+  // init tracking structures
+  // no deinit done, assuming these will never be destroyed
+  for(int i=0; i < N_BTNS; i++) {
+    // init RGBBtn structs
+    gRGBBtns[i].btnPin  = btnPins[i];
+    gRGBBtns[i].rgbAddr = btnAddrs[i];
+    gRGBBtns[i].color.red     = 0;
+    gRGBBtns[i].color.green   = 0;
+    gRGBBtns[i].color.blue    = 0;
+    pinMode(gRGBBtns[i].btnPin, INPUT_PULLUP);
+  }
+
+  Serial.print("---Setup ");
+  Serial.print(N_BTNS, DEC);
+  Serial.println(" RGBBtns---");
 }
 
 void setup()
@@ -135,6 +214,7 @@ void setup()
   Serial.println(ON_MSG);
   setupEncoder();
   setupARGB();
+  tlc.begin();
 }
 
 int8_t getEncoderAction(RotEnc* rotEnc)
@@ -195,61 +275,168 @@ int8_t getEncoderAction(RotEnc* rotEnc)
   return enc_action;
 }
 
+void updateStrip(RGBStrip* rgb, ColorId id, bool inc, bool dec, bool press)
+{
+  uint8_t* color = NULL;
+  
+  switch(id) {
+    case RED_ID:
+      color = &rgb->red;
+      break;
+    case GREEN_ID:
+      color = &rgb->green;
+      break;
+    case BLUE_ID:
+      color = &rgb->blue;
+      break;
+    default:
+      Serial.println("---BAD_COLOR_ID---");
+      return;
+  }
+
+  if(inc) {
+    if(*color < MAX_LED_VAL)
+      *color = *color+1;
+  } else if(dec) {
+      if(*color > 0)
+        *color = *color-1;
+  } else if(press) {
+    if(*color == 0)
+      *color = MAX_LED_VAL / 4;
+    else if(*color == (MAX_LED_VAL / 4))
+      *color = MAX_LED_VAL;
+    else
+      *color = 0;
+  }
+}
+
+bool ioSwitchActivated(IOSwitch* sw)
+{
+  ms_time_t now = millis();
+  uint8_t swPort = portFromId(sw->swPort);
+  bool wasActivated = false;
+
+  // handle millis() rollover after 50 days https://www.arduino.cc/reference/en/language/functions/time/millis/
+  if(now < sw->swLastChangeMs)
+    sw->swLastChangeMs = 0;
+
+  // only handle changes once we are out of the debounce delay
+  if((now - sw->swLastChangeMs) >= SW_DEBOUNCE_MS) {
+    if(bit_is_clear(swPort, sw->swPin % 8)) {
+      // only fire on the first press
+      if(!sw->swWasPressed) {
+        wasActivated = true;
+        sw->swLastChangeMs = now;
+        sw->swWasPressed = true;
+      }
+    } else {
+      // debounce check
+      sw->swWasPressed = false;
+      sw->swLastChangeMs = now;
+    }
+  }
+  return wasActivated;
+}
+
 void handleRotEncUpdates()
 {
-  unsigned long now = millis();
-
   // loop through encoders
   for(uint8_t i=0; i < N_ROTENC; i++) {
     // handle rotation updates
-    int8_t enc_action = getEncoderAction(&gRotEncs[i]);
-    if (enc_action > 0) { // Clockwise
-      if(gRGB[i] < 255)
-        gRGB[i]++;
-      Serial.print(i, DEC);
-      Serial.println(CW_CHAR);
-    } else if (enc_action < 0) { // Counter-clockwise
-      if(gRGB > 0)
-        gRGB[i]--;
-      Serial.print(i, DEC);
-      Serial.println(CCW_CHAR);
+    int8_t encAction  = getEncoderAction(&gRotEncs[i]);
+    bool wasActivated = ioSwitchActivated(&gRotEncs[i].btn);
+    updateStrip(&gRGBBtns[gSelectedStrip].color, i, encAction > 0, encAction < 0, wasActivated);
+  }
+}
+
+void handlePixUpdate()
+{
+  unsigned long now = millis();
+  if((now - gLastPixUpdate) > 10) {
+    RGBStrip* color = &gRGBBtns[gSelectedStrip].color;
+    for(uint16_t i=0; i<strip.numPixels(); i++) {
+      strip.setPixelColor(i, strip.Color(color->red, color->green, color->blue));
+    }
+    strip.show();
+    gLastPixUpdate = now;
+  }
+}
+
+void handleSerialCmds()
+{
+  Serial.setTimeout(100);
+  // handle serial cmds
+  while(Serial.available()) {
+    // MAXLEN + null term
+    char cmdBuf[SERIAL_CMD_MAXLEN+1] = {0,};
+    size_t cmdLen = Serial.readBytesUntil(SERIAL_CMD_DELIM, cmdBuf, SERIAL_CMD_MAXLEN);
+    // 0 len cmds are boring
+    if(cmdLen == 0)
+      return;
+
+
+    Serial.print("DEBUG: recv cmd: ");
+    Serial.write(cmdBuf, cmdLen);
+    Serial.println();
+    char cmd = cmdBuf[0];
+    char *argv[SERIAL_CMD_MAXARGS] = {0,};
+    uint8_t argc = 0;
+    uint8_t lastArgStart = 1;
+
+    // parse args
+    for(int i=1; i < cmdLen; i++) {
+      // find delim, set ptr
+      if(cmdBuf[i] == SERIAL_CMD_ARG_DELIM) {
+        argv[argc++] = &cmdBuf[lastArgStart];
+        lastArgStart = i+1;
+        // replace delim with null term
+        cmdBuf[i] = '\0';
+      }
     }
 
-    // handle rotation updates
-    uint8_t swPort = portFromId(gRotEncs[i].swPort);
-    // handle millis() rollover after 50 days https://www.arduino.cc/reference/en/language/functions/time/millis/
-    if(now < gRotEncs[i].swLastChangeMs)
-       gRotEncs[i].swLastChangeMs = 0;
-    // only handle changes once we are out of the debounce delay
-    if((now - gRotEncs[i].swLastChangeMs) >= SW_DEBOUNCE_MS) {
-      if(bit_is_clear(swPort, gRotEncs[i].swPin % 8)) {
-        // only fire on the first press
-        if(!gRotEncs[i].swWasPressed) {
-          gRGB[i] = 0;
-          Serial.print(i, DEC);
-          Serial.println(SW_CHAR);
-          gRotEncs[i].swLastChangeMs = now;
-          gRotEncs[i].swWasPressed = true;
-        }
-      } else {
-        // debounce check
-        gRotEncs[i].swWasPressed = false;
-        gRotEncs[i].swLastChangeMs = now;
-      }
+    // last arg will not have a delim after it
+    if(lastArgStart < cmdLen) {
+      argv[argc++] = &cmdBuf[lastArgStart];
+      cmdBuf[cmdLen] = '\0';
+    }
+
+    switch(cmd) {
+      case SERIAL_CMD_COLOR:
+        Serial.print("rgb=(");
+        Serial.print(atoi(argv[1]));
+        Serial.print(",");
+        Serial.print(atoi(argv[2]));
+        Serial.print(",");
+        Serial.print(atoi(argv[3]));
+        Serial.println(")");
+        /* gRGB[0] = (uint8_t)atoi(argv[1]); */
+        /* gRGB[1] = (uint8_t)atoi(argv[2]); */
+        /* gRGB[2] = (uint8_t)atoi(argv[3]); */
+        break;
+      case SERIAL_CMD_BTN_COLOR:
+        Serial.println("---BTN_COLOR_UPDATE---");
+        break;
+
+      default:
+        Serial.println("---INVALID_CMD---");
     }
   }
 }
 
 void loop()
 {
-  unsigned long now = millis();
   handleRotEncUpdates();
+  handlePixUpdate();
+  handleSerialCmds();
 
-  if((now - lastPixUpdate) > 10) {
-    for(uint16_t i=0; i<strip.numPixels(); i++) {
-      strip.setPixelColor(i, strip.Color(gRGB[0], gRGB[1], gRGB[2]));
+  ms_time_t now = millis();
+  if((now - gLastRGBBtnUpdate) > 100) {
+    
+    for(uint16_t i=0; i<3; i++) {
+      RGBStrip* color = &gRGBBtns[i].color;
+      tlc.setLED(i, color->red*8, color->green*8, color->blue*8);
     }
-    strip.show();
-    lastPixUpdate = now;
+    tlc.write();
+    gLastRGBBtnUpdate = now;
   }
 }
