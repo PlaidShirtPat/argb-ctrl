@@ -67,3 +67,53 @@ From [raspberry pi website](https://www.raspberrypi.org/documentation/hardware/r
 
 - We use 7.8MHz speed to get within the timing restrictions of the WS2812 protocol
 - Also, transfers must be greater than 96 bytes (source: I can't find the article I read, but it seems to work?)
+
+
+## Amplifier
+
+I wanted to bring the 3.3v signal coming out of the SPI MOSI to a 5v signal,
+I used [this reference](https://www.electronics-tutorials.ws/amplifier/amp_2.html)
+to design this circuit:
+
+```
+      +------+--------Vcc
+      |      |
+      R1     Rl
+      |      +--------Vout
+      |     -C
+ Vin--+---B-|
+  |   |     >E
+  |   |      +----+
+  |   R2     Re   |
+  |   |      |    |
+  +---+----+-+----+---Vgnd
+           |
+         Ground
+
+
+B = 2N2222 Base
+E = 2N2222 Emitter
+C = 2N2222 Collector
+
+Vin  = 3.3v
+Vcc  = 5v
+Vout = 5v
+Vgnd = 0v
+R1   = ?ohm
+R2   = ?ohm
+Rl   = 470ohm   // Resistance of the load (AKA the resistance between the LED data & ground pin
+                // Turns out the data pin has no resistance, so I'll just put a 470ohm resistor
+Re   = ?ohm     //
+
+Transistor Bias Voltage:
+      Vcc * R2
+VB = ----------
+      R1 + R2
+
+           VCC - VRe
+IC(max) = -----------
+              Rl
+
+
+
+```

@@ -9,6 +9,15 @@ Rotary Encoder with ARGB ctrl
   #include <avr/power.h>
 #endif
 
+#include <Wire.h>           // Include the I2C library (required)
+#include <SparkFunSX1509.h> // Include SX1509 library
+
+
+/*** SX1509 IO Expander Config ***/
+#define KEY_ROWS 3
+#define KEY_COLS 3
+#define IO_EXP_INT_PIN A3
+
 // How many boards do you have chained?
 #define NUM_TLC5974 1
 #define data   11
@@ -19,19 +28,19 @@ Rotary Encoder with ARGB ctrl
 // Type returned by millis() "syscall" (???)
 #define ms_time_t unsigned long
 
-#define ARGB_PIN    A0
-#define NUM_LEDS    8
-#define BRIGHTNESS  50
+#define N_ARGB 3
+#define ARGB_PINS   { A0, A1, A2 }
+#define ARGB_N_LEDS { 60, 8, 12 }
 
 #define N_BTNS      3
-#define BTN_PINS    { A3, A4, A5 }
+#define BTN_PINS    { 3, 4, 5 }
 #define BTN_ADDRS   { 0,  1,  2  }
 
 #define N_ROTENC    3
 #define ROTENC_PINS { \
-    2, 3, 4, \
-    5, 6, 7, \
-    8, 9, 10 }
+    2, 3, 0,\
+    4, 5, 1,\
+    6, 7, 2}
 
 #define MAX_LED_VAL         255
 #define N_ENCODER_STEPS     24
@@ -60,22 +69,24 @@ Rotary Encoder with ARGB ctrl
 #define PORTID_2            PINC
 
 #define RED_ID    0
-#define BLUE_ID   1
-#define GREEN_ID  2
+#define GREEN_ID  1
+#define BLUE_ID   2
 typedef uint8_t ColorId;
 
+// RGBStrip struct for tracking color and lighting effects
 typedef struct {
   uint8_t   red;              // red value
   uint8_t   green;            // green value
   uint8_t   blue;             // blue value
 } RGBStrip;
 
+// IO Switch struct
 typedef struct {
   uint8_t   swPin;            // Switch pin
   uint8_t   swPort;           // Switch port register for fast read access
   ms_time_t swLastChangeMs;   // Millisecond timestamp of last switch, for debounce
   bool      swWasPressed;     // flag for switch press
-
+  bool      activeHigh;
 } IOSwitch;
 
 // Rotary encoder struct
@@ -95,18 +106,19 @@ typedef struct {
   uint8_t   btnPin;           // button switch pin
   uint8_t   rgbAddr;          // address on the PWM controller
   RGBStrip  color;            // color of button
-  ms_time_t btnLastChangeMs;  // Millisecond timestamp of last switch, for debounce
-  bool      btnWasPressed;    // flag for switch press
+  IOSwitch  btn;
 } RGBBtn;
 
-static RGBBtn     gRGBBtns[N_BTNS]    = {0,};
-static RotEnc     gRotEncs[N_ROTENC]  = {0,};
-Adafruit_NeoPixel strip               = Adafruit_NeoPixel(NUM_LEDS, ARGB_PIN, NEO_GRB + NEO_KHZ800);
-Adafruit_TLC5947  tlc                 = Adafruit_TLC5947(NUM_TLC5974, clock, data, latch);
-static ms_time_t  gLastPixUpdate      = 0;
-static ms_time_t  gLastRGBBtnUpdate   = 0;
-static uint8_t    gRGB[3]             = {0,};
-static uint8_t    gSelectedStrip       = 0;
+static RGBBtn     gRGBBtns[N_BTNS]      = {0,};
+static RotEnc     gRotEncs[N_ROTENC]    = {0,};
+
+Adafruit_NeoPixel gARGBStrips[N_ARGB]     = {0,};
+static ms_time_t  gLastARGBUpdate[N_ARGB] = {0,};
+Adafruit_TLC5947  tlc                   = Adafruit_TLC5947(NUM_TLC5974, clock, data, latch);
+static ms_time_t  gLastRGBBtnUpdate     = 0;
+static uint8_t    gSelectedStrip        = 0;
+static SX1509     io;
+
 
 // see link for port info https://www.arduino.cc/en/Reference/PortManipulation
 uint8_t calcPinPort(uint8_t pin)
@@ -119,7 +131,9 @@ uint8_t calcPinPort(uint8_t pin)
     return 2;
 
   // Invalid pin
-  Serial.println("---BAD_PIN_PORT---");
+  Serial.print("---BAD_PIN_PORT(");
+  Serial.print(pin, DEC);
+  Serial.println(")---");
   return 0;
 }
 
@@ -133,7 +147,9 @@ uint8_t portFromId(uint8_t id)
     case 2:
       return PORTID_2;
     default:
-      Serial.println("---BAD_PORT_ID---");
+      Serial.print("---BAD_PORT_ID(");
+      Serial.print(id, DEC);
+      Serial.println(")---");
       return 0;
   }
 }
@@ -150,11 +166,10 @@ void setupEncoder()
     gRotEncs[i].bPin   = rotEncPins[i*3+1];
     gRotEncs[i].bPort  = calcPinPort(gRotEncs[i].bPin);
     gRotEncs[i].btn.swPin  = rotEncPins[i*3+2];
-    gRotEncs[i].btn.swPort = calcPinPort(gRotEncs[i].btn.swPin);
 
     pinMode(gRotEncs[i].aPin, INPUT_PULLUP);
     pinMode(gRotEncs[i].bPin, INPUT_PULLUP);
-    pinMode(gRotEncs[i].btn.swPin, INPUT_PULLUP);
+    io.pinMode(gRotEncs[i].btn.swPin, INPUT_PULLUP);
 
     // get an initial reading on the encoder pins
     if (digitalRead(gRotEncs[i].aPin) == LOW)
@@ -181,9 +196,13 @@ void setupEncoder()
 
 void setupARGB()
 {
-  /* strip.setBrightness(BRIGHTNESS); */
-  strip.begin();
-  strip.show(); // Initialize all pixels to 'off'
+  uint8_t stripPins[]  = ARGB_PINS;
+  uint8_t stripNLeds[] = ARGB_N_LEDS;;
+  for(int i=0; i < N_ARGB; i++) {
+    gARGBStrips[i] = Adafruit_NeoPixel(stripNLeds[i], stripPins[i], NEO_GRB + NEO_KHZ800);
+    gARGBStrips[i].begin();
+    gARGBStrips[i].show(); // Initialize all pixels to 'off'
+  }
 }
 
 void setupRGBBtns()
@@ -195,12 +214,23 @@ void setupRGBBtns()
   // no deinit done, assuming these will never be destroyed
   for(int i=0; i < N_BTNS; i++) {
     // init RGBBtn structs
-    gRGBBtns[i].btnPin  = btnPins[i];
-    gRGBBtns[i].rgbAddr = btnAddrs[i];
-    gRGBBtns[i].color.red     = 0;
-    gRGBBtns[i].color.green   = 0;
-    gRGBBtns[i].color.blue    = 0;
-    pinMode(gRGBBtns[i].btnPin, INPUT_PULLUP);
+    gRGBBtns[i].btn.swPin       = btnPins[i];
+    gRGBBtns[i].btn.activeHigh  = true;
+    gRGBBtns[i].rgbAddr         = btnAddrs[i];
+    gRGBBtns[i].color.red       = 0;
+    gRGBBtns[i].color.green     = 0;
+    gRGBBtns[i].color.blue      = 0;
+    io.pinMode(gRotEncs[i].btn.swPin, INPUT);
+
+
+    Serial.print("---RGBBtn[");
+    Serial.print(i, DEC);
+    Serial.print("],rgbAddr=");
+    Serial.print(gRGBBtns[i].rgbAddr);
+    Serial.print(",swPin=");
+    Serial.print(gRGBBtns[i].btn.swPin);
+    Serial.println("}");
+
   }
 
   Serial.print("---Setup ");
@@ -212,9 +242,28 @@ void setup()
 {
   Serial.begin(9600);
   Serial.println(ON_MSG);
+
+  if (!io.begin(0x3E))
+  {
+    Serial.println("IO expander setup failed");
+    // If we failed to communicate, turn the pin 13 LED on
+    int on = HIGH;
+    while (1) {
+      digitalWrite(LED_BUILTIN, on);
+      if(on == HIGH)
+        on = LOW;
+      else
+        on = HIGH;
+      delay(200);
+    }
+  }
+
   setupEncoder();
   setupARGB();
+  setupRGBBtns();
   tlc.begin();
+
+
 }
 
 int8_t getEncoderAction(RotEnc* rotEnc)
@@ -313,7 +362,6 @@ void updateStrip(RGBStrip* rgb, ColorId id, bool inc, bool dec, bool press)
 bool ioSwitchActivated(IOSwitch* sw)
 {
   ms_time_t now = millis();
-  uint8_t swPort = portFromId(sw->swPort);
   bool wasActivated = false;
 
   // handle millis() rollover after 50 days https://www.arduino.cc/reference/en/language/functions/time/millis/
@@ -322,7 +370,9 @@ bool ioSwitchActivated(IOSwitch* sw)
 
   // only handle changes once we are out of the debounce delay
   if((now - sw->swLastChangeMs) >= SW_DEBOUNCE_MS) {
-    if(bit_is_clear(swPort, sw->swPin % 8)) {
+    bool isHigh = io.digitalRead(sw->swPin) == HIGH;
+    bool active = (isHigh && sw->activeHigh) ||  (!isHigh && !sw->activeHigh);
+    if(active) {
       // only fire on the first press
       if(!sw->swWasPressed) {
         wasActivated = true;
@@ -343,22 +393,34 @@ void handleRotEncUpdates()
   // loop through encoders
   for(uint8_t i=0; i < N_ROTENC; i++) {
     // handle rotation updates
-    int8_t encAction  = getEncoderAction(&gRotEncs[i]);
-    bool wasActivated = ioSwitchActivated(&gRotEncs[i].btn);
+    int8_t encAction    = getEncoderAction(&gRotEncs[i]);
+    bool   wasActivated = ioSwitchActivated(&gRotEncs[i].btn);
     updateStrip(&gRGBBtns[gSelectedStrip].color, i, encAction > 0, encAction < 0, wasActivated);
   }
 }
 
 void handlePixUpdate()
 {
-  unsigned long now = millis();
-  if((now - gLastPixUpdate) > 10) {
-    RGBStrip* color = &gRGBBtns[gSelectedStrip].color;
-    for(uint16_t i=0; i<strip.numPixels(); i++) {
-      strip.setPixelColor(i, strip.Color(color->red, color->green, color->blue));
+  ms_time_t now = millis();
+  for(uint8_t i=0; i < N_ARGB; i++) {
+    if((now - gLastARGBUpdate[i]) > 50) {
+      RGBStrip* color = &gRGBBtns[i].color;
+      for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++) {
+        gARGBStrips[i].setPixelColor(j, gARGBStrips[i].Color(
+          color->red, color->green, color->blue));
+      }
+      gARGBStrips[i].show();
+      gLastARGBUpdate[i] = now;
     }
-    strip.show();
-    gLastPixUpdate = now;
+  }
+
+  if((now - gLastRGBBtnUpdate) > 50) {
+    for(uint8_t i=0; i<N_BTNS; i++) {
+      RGBStrip* color = &gRGBBtns[i].color;
+      tlc.setLED(i, color->red*8, color->green*8, color->blue*8);
+    }
+    tlc.write();
+    gLastRGBBtnUpdate = now;
   }
 }
 
@@ -370,14 +432,15 @@ void handleSerialCmds()
     // MAXLEN + null term
     char cmdBuf[SERIAL_CMD_MAXLEN+1] = {0,};
     size_t cmdLen = Serial.readBytesUntil(SERIAL_CMD_DELIM, cmdBuf, SERIAL_CMD_MAXLEN);
+
     // 0 len cmds are boring
     if(cmdLen == 0)
       return;
 
-
     Serial.print("DEBUG: recv cmd: ");
     Serial.write(cmdBuf, cmdLen);
     Serial.println();
+
     char cmd = cmdBuf[0];
     char *argv[SERIAL_CMD_MAXARGS] = {0,};
     uint8_t argc = 0;
@@ -423,20 +486,21 @@ void handleSerialCmds()
   }
 }
 
+void updateSelectedStrip()
+{
+  for(uint8_t i=0; i < N_BTNS; i++) {
+    if(ioSwitchActivated(&gRGBBtns[i].btn)) {
+      gSelectedStrip = i;
+      Serial.print("select:");
+      Serial.println(i);
+    }
+  }
+}
+
 void loop()
 {
+  updateSelectedStrip();
   handleRotEncUpdates();
-  handlePixUpdate();
   handleSerialCmds();
-
-  ms_time_t now = millis();
-  if((now - gLastRGBBtnUpdate) > 100) {
-    
-    for(uint16_t i=0; i<3; i++) {
-      RGBStrip* color = &gRGBBtns[i].color;
-      tlc.setLED(i, color->red*8, color->green*8, color->blue*8);
-    }
-    tlc.write();
-    gLastRGBBtnUpdate = now;
-  }
+  handlePixUpdate();
 }
