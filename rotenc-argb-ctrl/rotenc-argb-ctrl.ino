@@ -25,8 +25,11 @@ Rotary Encoder with ARGB ctrl
 #define latch  12
 #define oe     -1    // set to -1 to not use the enable pin (its optional)
 
-// Type returned by millis() "syscall" (???)
-#define ms_time_t unsigned long
+// Type returned by millis() library fn
+typedef unsigned long ms_time_t;
+// how long before we refresh lights to ensure color stays the same
+static const ms_time_t kColorFreshenLimitMs = 60 * 1000; // a minute
+static const ms_time_t kMinColorUpdateRateMs = 1000 / 60; // 60 times a second
 
 #define N_ARGB 3
 #define ARGB_PINS   { A0, A1, A2 }
@@ -73,11 +76,13 @@ Rotary Encoder with ARGB ctrl
 #define BLUE_ID   2
 typedef uint8_t ColorId;
 
+
 // RGBStrip struct for tracking color and lighting effects
 typedef struct {
   uint8_t   red;              // red value
   uint8_t   green;            // green value
   uint8_t   blue;             // blue value
+  bool      hasChanged;       // change flag
 } RGBStrip;
 
 // IO Switch struct
@@ -118,6 +123,7 @@ Adafruit_TLC5947  tlc                   = Adafruit_TLC5947(NUM_TLC5974, clock, d
 static ms_time_t  gLastRGBBtnUpdate     = 0;
 static uint8_t    gSelectedStrip        = 0;
 static SX1509     io;
+
 
 
 // see link for port info https://www.arduino.cc/en/Reference/PortManipulation
@@ -266,6 +272,24 @@ void setup()
 
 }
 
+// approx y=ceil((1/3*x)^2)
+// any y value over 255 will be 255
+// the exponent x^2 will help adjust for human's logarithmic perception of brightness
+// this means 63 steps between min and max led value
+// the rotEncs have 24 steps, so just under 3 rotations to go from min to max
+static const uint8_t levelTo8BitColorMap[] = {
+  /* 00-15 */ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 14, 16, 19, 22, 25,
+  /* 16-31 */ 29, 33, 36, 41, 45, 49, 54, 59, 64, 70, 76, 81, 88, 94, 100, 107,
+  /* 32-63 */ 114, 121, 129, 137, 144, 153, 161, 169, 178, 187, 196, 206, 216, 225, 236, 246,
+};
+
+uint8_t levelTo8BitColor(uint8_t level)
+{
+  if(level > (sizeof(levelTo8BitColorMap)-1))
+    return 255;
+  return levelTo8BitColorMap[level];
+}
+
 int8_t getEncoderAction(RotEnc* rotEnc)
 {
   int8_t enc_action = 0; // 1 or -1 if moved, sign is direction
@@ -327,7 +351,6 @@ int8_t getEncoderAction(RotEnc* rotEnc)
 void updateStrip(RGBStrip* rgb, ColorId id, bool inc, bool dec, bool press)
 {
   uint8_t* color = NULL;
-  
   switch(id) {
     case RED_ID:
       color = &rgb->red;
@@ -346,9 +369,11 @@ void updateStrip(RGBStrip* rgb, ColorId id, bool inc, bool dec, bool press)
   if(inc) {
     if(*color < MAX_LED_VAL)
       *color = *color+1;
+    rgb->hasChanged = true;
   } else if(dec) {
       if(*color > 0)
         *color = *color-1;
+    rgb->hasChanged = true;
   } else if(press) {
     if(*color == 0)
       *color = MAX_LED_VAL / 4;
@@ -356,6 +381,7 @@ void updateStrip(RGBStrip* rgb, ColorId id, bool inc, bool dec, bool press)
       *color = MAX_LED_VAL;
     else
       *color = 0;
+    rgb->hasChanged = true;
   }
 }
 
@@ -403,24 +429,29 @@ void handlePixUpdate()
 {
   ms_time_t now = millis();
   for(uint8_t i=0; i < N_ARGB; i++) {
-    if((now - gLastARGBUpdate[i]) > 50) {
-      RGBStrip* color = &gRGBBtns[i].color;
-      for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++) {
-        gARGBStrips[i].setPixelColor(j, gARGBStrips[i].Color(
-          color->red, color->green, color->blue));
-      }
-      gARGBStrips[i].show();
-      gLastARGBUpdate[i] = now;
-    }
-  }
+    RGBStrip* color = &gRGBBtns[i].color;
+    // only update if we need to do a refresh or color has changed
+    ms_time_t msSinceLastUpdate = (now - gLastARGBUpdate[i]);
+    bool needInit     = gLastARGBUpdate[i] == 0;
+    bool needUpdate   = (msSinceLastUpdate > kMinColorUpdateRateMs) && color->hasChanged;
+    bool needFreshen  = msSinceLastUpdate > kColorFreshenLimitMs;
+    if(needFreshen || needUpdate || needInit) {
+      uint8_t red = levelTo8BitColor(color->red);
+      uint8_t green = levelTo8BitColor(color->green);
+      uint8_t blue = levelTo8BitColor(color->blue);
 
-  if((now - gLastRGBBtnUpdate) > 50) {
-    for(uint8_t i=0; i<N_BTNS; i++) {
-      RGBStrip* color = &gRGBBtns[i].color;
-      tlc.setLED(i, color->red*8, color->green*8, color->blue*8);
+      // update strip pixels
+      for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
+        gARGBStrips[i].setPixelColor(j, gARGBStrips[i].Color(red, green, blue));
+      gLastARGBUpdate[i] = now;
+      gARGBStrips[i].show();
+
+      // update button colors
+      tlc.setLED(i, red*8, green*8, blue*8);
+      gLastRGBBtnUpdate = now;
+      tlc.write();
+      color->hasChanged = false;
     }
-    tlc.write();
-    gLastRGBBtnUpdate = now;
   }
 }
 
