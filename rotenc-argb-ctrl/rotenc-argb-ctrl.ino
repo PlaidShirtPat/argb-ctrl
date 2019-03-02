@@ -28,22 +28,25 @@ Rotary Encoder with ARGB ctrl
 // Type returned by millis() library fn
 typedef unsigned long ms_time_t;
 // how long before we refresh lights to ensure color stays the same
-static const ms_time_t kColorFreshenLimitMs = 60 * 1000; // a minute
-static const ms_time_t kMinColorUpdateRateMs = 1000 / 60; // 60 times a second
+static const ms_time_t kColorFreshenLimitMs   = 30 * 1000; // a minute
+static const ms_time_t kMinColorUpdateRateMs  = 1000 / 60; // 60 times a second
 
 #define N_ARGB 3
 #define ARGB_PINS   { A0, A1, A2 }
 #define ARGB_N_LEDS { 60, 8, 12 }
 
-#define N_BTNS      3
-#define BTN_PINS    { 3, 4, 5 }
-#define BTN_ADDRS   { 0,  1,  2  }
 
 #define N_ROTENC    3
 #define ROTENC_PINS { \
     2, 3, 0,\
     4, 5, 1,\
     6, 7, 2}
+
+#define N_BTNS      3
+#define BTN_PINS    { 3, 4, 5 }
+#define BTN_ADDRS   { 0, 1, 2 }
+
+static const uint8_t kEffectBtnPin = 7;
 
 #define MAX_LED_VAL         255
 #define N_ENCODER_STEPS     24
@@ -76,13 +79,30 @@ static const ms_time_t kMinColorUpdateRateMs = 1000 / 60; // 60 times a second
 #define BLUE_ID   2
 typedef uint8_t ColorId;
 
+enum EffectId : uint8_t {
+  kLightOff   = 0,
+  kSolidColor = 1,
+  kBlink      = 2,
+  kRainbow    = 3,
+};
+const EffectId kDefaultEffect = EffectId::kSolidColor;
+/*
+ * Tracks effect state, intepretation depends on related EffectId
+ * kLightOff:   Does nothing, should remain 0.
+ * kSolidColor: Does nothing, should remain 0.
+ * kRainbow:  
+ */
+typedef unsigned long EffectState;
 
 // RGBStrip struct for tracking color and lighting effects
 typedef struct {
-  uint8_t   red;              // red value
-  uint8_t   green;            // green value
-  uint8_t   blue;             // blue value
-  bool      hasChanged;       // change flag
+  uint8_t     red;              // red value
+  uint8_t     green;            // green value
+  uint8_t     blue;             // blue value
+  bool        hasChanged;       // change flag
+  EffectId    effectId;
+  EffectState effectState;
+  ms_time_t   effectTimer;
 } RGBStrip;
 
 // IO Switch struct
@@ -116,6 +136,10 @@ typedef struct {
 
 static RGBBtn     gRGBBtns[N_BTNS]      = {0,};
 static RotEnc     gRotEncs[N_ROTENC]    = {0,};
+static IOSwitch   gEffectBtn  = {
+  .swPin      = kEffectBtnPin,
+  .activeHigh = false,
+};
 
 Adafruit_NeoPixel gARGBStrips[N_ARGB]     = {0,};
 static ms_time_t  gLastARGBUpdate[N_ARGB] = {0,};
@@ -123,7 +147,6 @@ Adafruit_TLC5947  tlc                   = Adafruit_TLC5947(NUM_TLC5974, clock, d
 static ms_time_t  gLastRGBBtnUpdate     = 0;
 static uint8_t    gSelectedStrip        = 0;
 static SX1509     io;
-
 
 
 // see link for port info https://www.arduino.cc/en/Reference/PortManipulation
@@ -226,6 +249,7 @@ void setupRGBBtns()
     gRGBBtns[i].color.red       = 0;
     gRGBBtns[i].color.green     = 0;
     gRGBBtns[i].color.blue      = 0;
+    gRGBBtns[i].color.effectId  = kDefaultEffect;
     io.pinMode(gRotEncs[i].btn.swPin, INPUT);
 
 
@@ -244,11 +268,8 @@ void setupRGBBtns()
   Serial.println(" RGBBtns---");
 }
 
-void setup()
+void setupIoExpander()
 {
-  Serial.begin(9600);
-  Serial.println(ON_MSG);
-
   if (!io.begin(0x3E))
   {
     Serial.println("IO expander setup failed");
@@ -263,13 +284,20 @@ void setup()
       delay(200);
     }
   }
+}
 
+void setup()
+{
+  Serial.begin(9600);
+  Serial.println(ON_MSG);
+
+  setupIoExpander();
+
+  io.pinMode(gEffectBtn.swPin, INPUT_PULLUP);
   setupEncoder();
   setupARGB();
   setupRGBBtns();
   tlc.begin();
-
-
 }
 
 // approx y=ceil((1/3*x)^2)
@@ -278,9 +306,12 @@ void setup()
 // this means 63 steps between min and max led value
 // the rotEncs have 24 steps, so just under 3 rotations to go from min to max
 static const uint8_t levelTo8BitColorMap[] = {
-  /* 00-15 */ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 14, 16, 19, 22, 25,
-  /* 16-31 */ 29, 33, 36, 41, 45, 49, 54, 59, 64, 70, 76, 81, 88, 94, 100, 107,
-  /* 32-63 */ 114, 121, 129, 137, 144, 153, 161, 169, 178, 187, 196, 206, 216, 225, 236, 246,
+  /* 00-15 */
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 14, 16, 19, 22, 25,
+  /* 16-31 */
+  29, 33, 36, 41, 45, 49, 54, 59, 64, 70, 76, 81, 88, 94, 100, 107,
+  /* 32-63 */
+  114, 121, 129, 137, 144, 153, 161, 169, 178, 187, 196, 206, 216, 225, 236, 246,
 };
 
 uint8_t levelTo8BitColor(uint8_t level)
@@ -375,12 +406,7 @@ void updateStrip(RGBStrip* rgb, ColorId id, bool inc, bool dec, bool press)
         *color = *color-1;
     rgb->hasChanged = true;
   } else if(press) {
-    if(*color == 0)
-      *color = MAX_LED_VAL / 4;
-    else if(*color == (MAX_LED_VAL / 4))
-      *color = MAX_LED_VAL;
-    else
-      *color = 0;
+    *color = 0;
     rgb->hasChanged = true;
   }
 }
@@ -390,7 +416,8 @@ bool ioSwitchActivated(IOSwitch* sw)
   ms_time_t now = millis();
   bool wasActivated = false;
 
-  // handle millis() rollover after 50 days https://www.arduino.cc/reference/en/language/functions/time/millis/
+  // handle millis() rollover after 50 days 
+  // https://www.arduino.cc/reference/en/language/functions/time/millis/
   if(now < sw->swLastChangeMs)
     sw->swLastChangeMs = 0;
 
@@ -441,8 +468,35 @@ void handlePixUpdate()
       uint8_t blue = levelTo8BitColor(color->blue);
 
       // update strip pixels
-      for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
-        gARGBStrips[i].setPixelColor(j, gARGBStrips[i].Color(red, green, blue));
+      switch(color->effectId) {
+
+        case EffectId::kBlink:
+          if(color->effectState == 0) {
+            for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
+              gARGBStrips[i].setPixelColor(j,
+                gARGBStrips[i].Color(0, 0, 0));
+          } else {
+            for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
+              gARGBStrips[i].setPixelColor(j,
+                gARGBStrips[i].Color(red, green, blue));
+          }
+          break;
+
+        case EffectId::kRainbow:
+        case EffectId::kSolidColor:
+          for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
+            gARGBStrips[i].setPixelColor(j,
+              gARGBStrips[i].Color(red, green, blue));
+          break;
+
+        case EffectId::kLightOff:
+          for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
+            gARGBStrips[i].setPixelColor(j,
+              gARGBStrips[i].Color(0, 0, 0));
+          break;
+        default:
+          Serial.println("BUG: unknown effectId");
+      }
       gLastARGBUpdate[i] = now;
       gARGBStrips[i].show();
 
@@ -522,16 +576,82 @@ void updateSelectedStrip()
   for(uint8_t i=0; i < N_BTNS; i++) {
     if(ioSwitchActivated(&gRGBBtns[i].btn)) {
       gSelectedStrip = i;
-      Serial.print("select:");
-      Serial.println(i);
     }
   }
+}
+
+void handleEffectUpdates()
+{
+
+  RGBStrip* color = &gRGBBtns[gSelectedStrip].color;
+  // update effect
+  if(ioSwitchActivated(&gEffectBtn)) {
+    switch(color->effectId) {
+      case EffectId::kLightOff:
+        color->effectId = EffectId::kSolidColor;
+        Serial.println("effect set to solid");
+        break;
+      case EffectId::kSolidColor:
+        color->effectId = EffectId::kBlink;
+        Serial.println("effect set to blink");
+        break;
+      case EffectId::kBlink:
+        color->effectId = EffectId::kRainbow;
+        Serial.println("effect set to rainbow");
+        break;
+      case EffectId::kRainbow:
+        color->effectId = EffectId::kLightOff;
+        Serial.println("effect set to off");
+        break;
+      default:
+        color->effectId = EffectId::kSolidColor;
+    }
+    // reset effect state
+    color->effectState = 0;
+    color->effectTimer = 0;
+  }
+
+
+  ms_time_t now = millis();
+  for(uint8_t i=0; i < N_ARGB; i++) {
+    RGBStrip* color = &gRGBBtns[i].color;
+    ms_time_t msSinceTimer   = (now - color->effectTimer);
+    bool      effectWasReset = color->effectTimer == 0;
+    // update effect state
+    switch(color->effectId) {
+
+      case EffectId::kBlink:
+        if(effectWasReset) {
+          Serial.println("init blink effect");
+          color->effectTimer = now;
+          color->effectState = 1;
+        } else if(msSinceTimer > 1000) {
+          if(color->effectState == 0)
+            color->effectState = 1;
+          else
+            color->effectState = 0;
+          color->hasChanged = true;
+          color->effectTimer = now;
+        }
+        break;
+
+      case EffectId::kRainbow:
+      case EffectId::kLightOff:
+      case EffectId::kSolidColor:
+        // no update
+        break;
+      default:
+        Serial.println("BUG: unknown effectId");
+    }
+  }
+
 }
 
 void loop()
 {
   updateSelectedStrip();
+  handleEffectUpdates();
   handleRotEncUpdates();
-  handleSerialCmds();
+  /* handleSerialCmds(); */
   handlePixUpdate();
 }
