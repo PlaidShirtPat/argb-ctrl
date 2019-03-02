@@ -94,6 +94,20 @@ const EffectId kDefaultEffect = EffectId::kSolidColor;
  */
 typedef unsigned long EffectState;
 
+const uint8_t kRainbowRgbValues[][3] {
+  {255,   0,   0},
+  {255, 100,   0},
+  {255, 255,   0},
+  {  0, 255,   0},
+  {  0, 255, 255},
+  {  0,   0, 255},
+  { 75,   0, 130},
+  {148,   0, 211},
+};
+
+const size_t kRainbowRgbValuesLen =
+  sizeof(kRainbowRgbValues) / sizeof(kRainbowRgbValues[0]);
+
 // RGBStrip struct for tracking color and lighting effects
 typedef struct {
   uint8_t     red;              // red value
@@ -483,6 +497,17 @@ void handlePixUpdate()
           break;
 
         case EffectId::kRainbow:
+          for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++) {
+            size_t colorIndex = (j+color->effectState) % (kRainbowRgbValuesLen-1);
+            gARGBStrips[i].setPixelColor(j,
+              gARGBStrips[i].Color(
+                kRainbowRgbValues[colorIndex][0],
+                kRainbowRgbValues[colorIndex][1],
+                kRainbowRgbValues[colorIndex][2])
+            );
+          }
+          break;
+
         case EffectId::kSolidColor:
           for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
             gARGBStrips[i].setPixelColor(j,
@@ -589,19 +614,15 @@ void handleEffectUpdates()
     switch(color->effectId) {
       case EffectId::kLightOff:
         color->effectId = EffectId::kSolidColor;
-        Serial.println("effect set to solid");
         break;
       case EffectId::kSolidColor:
         color->effectId = EffectId::kBlink;
-        Serial.println("effect set to blink");
         break;
       case EffectId::kBlink:
         color->effectId = EffectId::kRainbow;
-        Serial.println("effect set to rainbow");
         break;
       case EffectId::kRainbow:
         color->effectId = EffectId::kLightOff;
-        Serial.println("effect set to off");
         break;
       default:
         color->effectId = EffectId::kSolidColor;
@@ -622,7 +643,6 @@ void handleEffectUpdates()
 
       case EffectId::kBlink:
         if(effectWasReset) {
-          Serial.println("init blink effect");
           color->effectTimer = now;
           color->effectState = 1;
         } else if(msSinceTimer > 1000) {
@@ -636,6 +656,19 @@ void handleEffectUpdates()
         break;
 
       case EffectId::kRainbow:
+        if(effectWasReset) {
+          color->effectTimer = now;
+        } else if(msSinceTimer > 500) {
+          // increment offsets
+          if(color->effectState == sizeof(kRainbowRgbValues)-1)
+            color->effectState = 0;
+          else
+            color->effectState++;
+          color->hasChanged = true;
+          color->effectTimer = now;
+        }
+      break;
+
       case EffectId::kLightOff:
       case EffectId::kSolidColor:
         // no update
