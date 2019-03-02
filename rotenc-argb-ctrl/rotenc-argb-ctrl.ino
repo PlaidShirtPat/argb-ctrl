@@ -158,7 +158,6 @@ static IOSwitch   gEffectBtn  = {
 Adafruit_NeoPixel gARGBStrips[N_ARGB]     = {0,};
 static ms_time_t  gLastARGBUpdate[N_ARGB] = {0,};
 Adafruit_TLC5947  tlc                   = Adafruit_TLC5947(NUM_TLC5974, clock, data, latch);
-static ms_time_t  gLastRGBBtnUpdate     = 0;
 static uint8_t    gSelectedStrip        = 0;
 static SX1509     io;
 
@@ -489,10 +488,15 @@ void handlePixUpdate()
             for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
               gARGBStrips[i].setPixelColor(j,
                 gARGBStrips[i].Color(0, 0, 0));
+
+            tlc.setLED(i, 0, 0, 0);
           } else {
             for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
               gARGBStrips[i].setPixelColor(j,
                 gARGBStrips[i].Color(red, green, blue));
+
+            // update button colors
+            tlc.setLED(i, red*8, green*8, blue*8);
           }
           break;
 
@@ -504,6 +508,8 @@ void handlePixUpdate()
             uint8_t rainbowBlue = (kRainbowRgbValues[colorIndex][2] * blue) / 255;
             gARGBStrips[i].setPixelColor(j,
               gARGBStrips[i].Color( rainbowRed, rainbowGreen, rainbowBlue));
+            if(j == 0)
+              tlc.setLED(i, rainbowRed*8, rainbowGreen*8, rainbowBlue*8);
           }
           break;
 
@@ -511,12 +517,14 @@ void handlePixUpdate()
           for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
             gARGBStrips[i].setPixelColor(j,
               gARGBStrips[i].Color(red, green, blue));
+          tlc.setLED(i, red*8, green*8, blue*8);
           break;
 
         case EffectId::kLightOff:
           for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++)
             gARGBStrips[i].setPixelColor(j,
               gARGBStrips[i].Color(0, 0, 0));
+          tlc.setLED(i, 0, 0, 0);
           break;
         default:
           Serial.println("BUG: unknown effectId");
@@ -524,9 +532,6 @@ void handlePixUpdate()
       gLastARGBUpdate[i] = now;
       gARGBStrips[i].show();
 
-      // update button colors
-      tlc.setLED(i, red*8, green*8, blue*8);
-      gLastRGBBtnUpdate = now;
       tlc.write();
       color->hasChanged = false;
     }
