@@ -28,7 +28,7 @@ Rotary Encoder with ARGB ctrl
 // Type returned by millis() library fn
 typedef unsigned long ms_time_t;
 // how long before we refresh lights to ensure color stays the same
-static const ms_time_t kColorFreshenLimitMs   = 30 * 1000; // a minute
+static const ms_time_t kColorFreshenLimitMs   = 60L * 1000L; // a minute
 static const ms_time_t kMinColorUpdateRateMs  = 1000 / 60; // 60 times a second
 
 #define N_ARGB 3
@@ -499,12 +499,11 @@ void handlePixUpdate()
         case EffectId::kRainbow:
           for(uint16_t j=0; j < gARGBStrips[i].numPixels(); j++) {
             size_t colorIndex = (j+color->effectState) % (kRainbowRgbValuesLen-1);
+            uint8_t rainbowRed = (kRainbowRgbValues[colorIndex][0] * red) / 255;
+            uint8_t rainbowGreen = (kRainbowRgbValues[colorIndex][1] * green) / 255;
+            uint8_t rainbowBlue = (kRainbowRgbValues[colorIndex][2] * blue) / 255;
             gARGBStrips[i].setPixelColor(j,
-              gARGBStrips[i].Color(
-                kRainbowRgbValues[colorIndex][0],
-                kRainbowRgbValues[colorIndex][1],
-                kRainbowRgbValues[colorIndex][2])
-            );
+              gARGBStrips[i].Color( rainbowRed, rainbowGreen, rainbowBlue));
           }
           break;
 
